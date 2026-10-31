@@ -1,4 +1,5 @@
 #pragma once
+#include <MyanmarHarfBuzz.h>
 
 // CrossPoint <- FreeInkFont adapter (FreeType, 4-style, lazy, streaming).
 //
@@ -68,6 +69,15 @@ class TtfEpdFont {
   bool load(uint16_t pointSize, bool twoBit = true, size_t glyphCacheBytes = 32 * 1024, uint16_t maxGlyphs = 768);
 
   EpdFontFamily family() const;
+
+  // Shaping bridge: retrieve a rasterized glyph by the glyph ID emitted by
+  // HarfBuzz (not a Unicode scalar). Returned pointer is cache-owned and can
+  // be invalidated by cache flushes; consume it before requesting more glyphs.
+  // Style uses the same 0..3 roles as the font family.
+  bool shapeMyanmar(uint8_t style, const char* utf8, std::vector<myanmar_text::PositionedGlyph>& out) const;
+  const EpdGlyph* getShapedGlyph(uint8_t style, uint32_t glyphId);
+  const uint8_t* getShapedGlyphBitmap(uint8_t style, const EpdGlyph* glyph) const;
+
 
   // Per-scope reset (mirrors SdCardFont::clearCache): drop every face's cached
   // page glyphs but KEEP the allocations (byte arena + vector capacity), so a

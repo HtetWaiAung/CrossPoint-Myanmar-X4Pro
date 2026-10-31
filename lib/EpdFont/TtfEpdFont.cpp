@@ -294,9 +294,15 @@ const EpdGlyph* TtfEpdFont::faultGlyph(Face& f, const uint32_t cp) {
 
   // Resolve to a glyph ID: cmap first, then the GSUB result for the ligature
   // presentation codepoints (whose glyphs commonly have no cmap entry at all).
-  freeink::font::FtFont::GlyphId gid = f.ft.glyphId(cp);
-  if (gid == 0 && cp >= 0xFB00u && cp <= 0xFB04u) gid = f.ligGid[cp - 0xFB00u];
-  if (gid == 0 && cp != REPLACEMENT_GLYPH) return nullptr;
+  // Internal high-bit cache keys represent shaped glyph IDs, not codepoints.
+  // Unicode scalar values never use bit 31, so the two cache namespaces do not
+  // collide. This lets the existing bitmap cache handle GSUB substitutions.
+  const bool isShapedGid = (cp & 0x80000000u) != 0;
+  freeink::font::FtFont::GlyphId gid = isShapedGid
+      ? static_cast<freeink::font::FtFont::GlyphId>(cp & 0x7fffffffu)
+      : f.ft.glyphId(cp);
+  if (!isShapedGid && gid == 0 && cp >= 0xFB00u && cp <= 0xFB04u) gid = f.ligGid[cp - 0xFB00u];
+  if (gid == 0 && (isShapedGid || cp != REPLACEMENT_GLYPH)) return nullptr;
 
   // Glyph-ID render at the exact fractional ppem. The metrics pass costs a
   // second glyph load per MISS only (hits come from the cache) and yields the
@@ -449,6 +455,38 @@ bool TtfEpdFont::coverageThunk(void* ctx, const uint32_t codepoint) {
   // Ligature presentation codepoints resolvable through GSUB despite no cmap
   // entry (some EPUBs carry literal U+FB01/U+FB02 in their text).
   return codepoint >= 0xFB00u && codepoint <= 0xFB04u && reg.ligGid[codepoint - 0xFB00u] != 0;
+}
+
+bool TtfEpdFont::shapeMyanmar(uint8_t style, const char* utf8,
+                             std::vector<myanmar_text::PositionedGlyph>& out) const {
+  out.clear();
+  if (!loaded_ || style > 3 || !utf8 || !*utf8) return false;
+  const Source& src = sources_[faces_[style].srcIndex];
+  if (!src.present) return false;
+  if (!src.streamed) {
+    myanmar_text::MyanmarHarfBuzz shaper(src.data, src.len);
+    return shaper.shape(utf8, faces_[style].sizePx, out);
+  }
+  // Use FreeInkFont's existing SD reader. HarfBuzz requests only the OpenType
+  // tables it needs; the complete TTF is never copied into RAM.
+  auto reader = [](void* ctx, uint32_t offset, uint8_t* dest, uint32_t length) -> bool {
+    const auto* source = static_cast<const Source*>(ctx);
+    return source->read(source->ctx, offset, dest, length);
+  };
+  myanmar_text::MyanmarHarfBuzz shaper(reader, const_cast<Source*>(&src), static_cast<uint32_t>(src.fileSize));
+  return shaper.shape(utf8, faces_[style].sizePx, out);
+}
+
+const EpdGlyph* TtfEpdFont::getShapedGlyph(uint8_t style, uint32_t glyphId) {
+  if (!loaded_ || style > 3 || glyphId == 0 || glyphId > 0x7fffffffu) return nullptr;
+  return faultGlyph(faces_[style], glyphId | 0x80000000u);
+}
+
+const uint8_t* TtfEpdFont::getShapedGlyphBitmap(uint8_t style, const EpdGlyph* glyph) const {
+  if (style > 3 || !glyph || !glyph->dataLength) return nullptr;
+  const Face& face = faces_[style];
+  if (static_cast<size_t>(glyph->dataOffset) + glyph->dataLength > face.bmp.size()) return nullptr;
+  return face.bmp.data() + glyph->dataOffset;
 }
 
 EpdFontFamily TtfEpdFont::family() const {

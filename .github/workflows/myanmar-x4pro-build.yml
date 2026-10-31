@@ -1,0 +1,29 @@
+name: Myanmar X4 Pro experimental build
+on:
+  workflow_dispatch:
+  push:
+    branches: [myanmar-x4pro]
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+      - name: Build for XTEINK X4 Pro
+        run: pio run -e x4pro -j 2
+      - name: Collect firmware artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosspoint-myanmar-x4pro-experimental
+          path: |
+            .pio/build/x4pro/firmware.bin
+            .pio/build/x4pro/firmware.elf
+            .pio/build/x4pro/partitions.bin
+          if-no-files-found: warn

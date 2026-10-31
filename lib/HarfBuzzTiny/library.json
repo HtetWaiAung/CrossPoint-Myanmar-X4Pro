@@ -1,0 +1,13 @@
+{
+  "name": "HarfBuzzTiny",
+  "version": "12.3.0-myanmar-edition",
+  "build": {
+    "flags": [
+      "-DHB_TINY=1"
+    ],
+    "srcFilter": [
+      "-<*>",
+      "+<harfbuzz-world.cc>"
+    ]
+  }
+}
