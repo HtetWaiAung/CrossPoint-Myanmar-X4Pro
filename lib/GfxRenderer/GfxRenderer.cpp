@@ -9,6 +9,8 @@
 #include <MemoryManager.h>
 #include <SdCardFont.h>
 #include <TtfEpdFont.h>
+#include <MyanmarRuns.h>
+#include <MyanmarHarfBuzz.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -672,6 +674,15 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
+  // Use the same HarfBuzz advances as drawText for Myanmar TTF strings.
+  const auto vectorIt = ttfFonts_.find(resolvedFontId);
+  if (vectorIt != ttfFonts_.end()) {
+    const auto runs = myanmar_text::splitRuns(text);
+    for (const auto& run : runs) {
+      if (run.myanmar) return getTextAdvanceX(fontId, text, style, 0, baseDir);
+    }
+  }
+
   std::string visual;
   const char* renderedText = resolveVisualText(text, visual, baseDir);
 
@@ -704,6 +715,68 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   // Route non-Latin strings to the fallback font when the requested font
   // lacks the glyphs (e.g. Chinese book titles drawn with a Latin UI font).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
+
+  // Shape Myanmar runs with OpenType GSUB/GPOS. Keep the rest of the
+  // renderer, including Latin text and EPUB layout, untouched.
+  const auto myanmarFont = ttfFonts_.find(resolvedFontId);
+  if (myanmarFont != ttfFonts_.end()) {
+    const auto runs = myanmar_text::splitRuns(text);
+    bool hasMyanmar = false;
+    for (const auto& run : runs) hasMyanmar |= run.myanmar;
+    if (hasMyanmar) {
+      const uint8_t faceStyle = static_cast<uint8_t>(style) & 3;
+      std::vector<std::vector<myanmar_text::PositionedGlyph>> shapedRuns(runs.size());
+      bool allShaped = true;
+      for (size_t i = 0; i < runs.size(); ++i) {
+        if (runs[i].myanmar &&
+            !myanmarFont->second->shapeMyanmar(faceStyle, runs[i].utf8.c_str(), shapedRuns[i])) {
+          allShaped = false;
+          break;
+        }
+      }
+      if (allShaped) {
+        if (fontCacheManager_ && fontCacheManager_->isScanning()) {
+          fontCacheManager_->recordText(text, resolvedFontId, style);
+          return;
+        }
+        int cursor = x;
+        const int baseline = y + getFontAscenderSize(resolvedFontId);
+        for (size_t i = 0; i < runs.size(); ++i) {
+          if (!runs[i].myanmar) {
+            drawText(resolvedFontId, cursor, y, runs[i].utf8.c_str(), black, style, baseDir, tracking);
+            cursor += getTextAdvanceX(resolvedFontId, runs[i].utf8.c_str(), style, tracking, baseDir);
+            continue;
+          }
+          int64_t penX = 0;
+          int64_t penY = 0;
+          for (const auto& shaped : shapedRuns[i]) {
+            const EpdGlyph* glyph = myanmarFont->second->getShapedGlyph(faceStyle, shaped.glyphId);
+            if (glyph && glyph->width && glyph->height) {
+              const uint8_t* bitmap = myanmarFont->second->getShapedGlyphBitmap(faceStyle, glyph);
+              if (bitmap) {
+                // HB offsets are 26.6 pixel coordinates; FreeType top is a
+                // positive upward bearing. Do not apply independent mark positioning.
+                const int gx = cursor + static_cast<int>((penX + shaped.xOffset26_6 + 32) >> 6) + glyph->left;
+                const int gy = baseline - static_cast<int>((penY + shaped.yOffset26_6 + 32) >> 6) - glyph->top;
+                glyphBitmap::Frame frame{gx, gy, 1, 0, 0, 1};
+                const auto familyIt = fontMap.find(resolvedFontId);
+                if (familyIt != fontMap.end()) {
+                  const EpdFontData* fontData = familyIt->second.getData(style);
+                  const bool twoBit = fontData && fontData->is2Bit;
+                  drawGlyphBitmap(bitmap, glyph->width, glyph->height, frame, twoBit,
+                                  grayPlanesAreAbsolute() ? BW : renderMode, black);
+                }
+              }
+            }
+            penX += shaped.xAdvance26_6;
+            penY += shaped.yAdvance26_6;
+          }
+          cursor += static_cast<int>((penX + 32) >> 6);
+        }
+        return;
+      }
+    }
+  }
 
   std::string visual;
   const char* renderedText = resolveVisualText(text, visual, baseDir);
@@ -2132,6 +2205,35 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   // right margin.
   std::string visual;
   text = resolveVisualText(text, visual, baseDir);
+
+  // Measure the same shaped glyph advances used by drawText. Do this before
+  // the SD-card advance-table shortcut, which lacks GSUB substitutions.
+  const auto myanmarFont = ttfFonts_.find(resolvedFontId);
+  if (myanmarFont != ttfFonts_.end()) {
+    const auto runs = myanmar_text::splitRuns(text);
+    bool hasMyanmar = false;
+    for (const auto& run : runs) hasMyanmar |= run.myanmar;
+    if (hasMyanmar) {
+      const uint8_t faceStyle = static_cast<uint8_t>(style) & 3;
+      int width = 0;
+      bool allShaped = true;
+      for (const auto& run : runs) {
+        if (!run.myanmar) {
+          width += getTextAdvanceX(resolvedFontId, run.utf8.c_str(), style, tracking, baseDir, mode);
+          continue;
+        }
+        std::vector<myanmar_text::PositionedGlyph> glyphs;
+        if (!myanmarFont->second->shapeMyanmar(faceStyle, run.utf8.c_str(), glyphs)) {
+          allShaped = false;
+          break;
+        }
+        int64_t advance = 0;
+        for (const auto& glyph : glyphs) advance += glyph.xAdvance26_6;
+        width += static_cast<int>((advance + 32) >> 6);
+      }
+      if (allShaped) return width;
+    }
+  }
 
   // Advance table fast-path for SD card fonts during layout.
   // Snap each advance like drawText. Kerning/ligature data is not resident
